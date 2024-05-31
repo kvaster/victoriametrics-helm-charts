@@ -7,10 +7,12 @@ import re
 import textwrap
 from os import makedirs, path
 
+import _jsonnet
 import requests
 import yaml
 from yaml.representer import SafeRepresenter
 
+from urllib.parse import urljoin
 
 # https://stackoverflow.com/a/20863889/961092
 class LiteralStr(str):
@@ -25,42 +27,63 @@ def change_style(style, representer):
 
     return new_representer
 
-sources_json = [
+sources = [
     {
         'source': 'https://raw.githubusercontent.com/VictoriaMetrics/VictoriaMetrics/master/dashboards/victoriametrics.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/VictoriaMetrics/VictoriaMetrics/master/dashboards/vmagent.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/VictoriaMetrics/VictoriaMetrics/master/dashboards/victoriametrics-cluster.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/VictoriaMetrics/VictoriaMetrics/master/dashboards/vmalert.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/VictoriaMetrics/VictoriaMetrics/master/dashboards/operator.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-system-coredns.json',
+        'type': 'json',
+    },
+    {
+        'source': 'https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-system-api-server.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-global.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-namespaces.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-pods.json',
+        'type': 'json',
+    },
+    {
+        'source': 'https://raw.githubusercontent.com/dotdc/grafana-dashboards-kubernetes/master/dashboards/k8s-views-nodes.json',
+        'type': 'json',
     },
     {
         'source': 'https://raw.githubusercontent.com/VictoriaMetrics/VictoriaMetrics/master/dashboards/backupmanager.json',
-    }
-]
-# Source files list
-sources_yaml = [
+        'type': 'json',
+    },
     {
         'source': 'https://raw.githubusercontent.com/prometheus-operator/kube-prometheus/main/manifests/grafana-dashboardDefinitions.yaml',
+        'type': 'yaml',
+    },
+    {
+        'source': 'https://raw.githubusercontent.com/etcd-io/etcd/main/contrib/mixin/mixin.libsonnet',
+        'type': 'jsonnet',
+        'template': '({}).grafanaDashboards',
     },
 ]
 
@@ -293,37 +316,43 @@ def write_group_to_file(resource_name, content, url, destination):
 def main():
     init_yaml_styles()
     # read the rules, create a new template file per group
-    for src in sources_json:
+    for src in sources:
         print("Generating dashboards from %s" % src['source'])
         response = requests.get(src['source'])
         if response.status_code != 200:
             print('Skipping the file, response code %s not equals 200' % response.status_code)
             continue
         raw_text = response.text
-        json_text = json.loads(raw_text)
-        # is it already a dashboard structure or is it nested (etcd case)?
-        flat_structure = bool(json_text.get('annotations'))
-        if flat_structure:
-            resource = src.get('name', path.basename(src['source']).replace('.json', ''))
-            write_group_to_file(resource, json.dumps(json_text, indent=4), src['source'], dashboards_destination)
-        else:
-            for resource, content in json_text.items():
-                write_group_to_file(resource.replace('.json', ''), json.dumps(content, indent=4), src['source'], dashboards_destination)
-
-    for src in sources_yaml:
-        print("Generating dashboards from %s" % src['source'])
-        response = requests.get(src['source'])
-        if response.status_code != 200:
-            print('Skipping the file, response code %s not equals 200' % response.status_code)
-            continue
-        raw_text = response.text
-        yaml_text = yaml.full_load(raw_text)
-        groups = yaml_text['items']
-        for group in groups:
-            for resource, content in group['data'].items():
-                if resource not in allow_dashboards_list:
-                    continue
-                write_group_to_file(resource.replace('.json', ''), content, src['source'], dashboards_destination)
+        if src['type'] == 'json' or src['type'] == 'jsonnet':
+            if src['type'] == 'json':
+                json_text = json.loads(raw_text)
+            else:
+                def import_callback(dir, rel):
+                    url = urljoin(dir, rel)
+                    m = re.match(r"^github.com\/(\w+)\/(\w+)\/(.*)$", rel)
+                    if m:
+                        url = 'https://raw.githubusercontent.com/{}/{}/main/{}'.format(m.group(1), m.group(2), m.group(3))
+                    response = requests.get(url)
+                    if response.status_code != 200:
+                        raise Exception('error loading import')
+                    return urljoin(url, '.'), response.content
+                json_text = json.loads(_jsonnet.evaluate_snippet(src['source'], src['template'].format(raw_text), import_callback=import_callback))
+            # is it already a dashboard structure or is it nested (etcd case)?
+            flat_structure = bool(json_text.get('annotations'))
+            if flat_structure:
+                resource = src.get('name', path.basename(src['source']).replace('.json', ''))
+                write_group_to_file(resource, json.dumps(json_text, indent=4), src['source'], dashboards_destination)
+            else:
+                for resource, content in json_text.items():
+                    write_group_to_file(resource.replace('.json', ''), json.dumps(content, indent=4), src['source'], dashboards_destination)
+        elif src['type'] == 'yaml':
+            yaml_text = yaml.full_load(raw_text)
+            groups = yaml_text['items']
+            for group in groups:
+                for resource, content in group['data'].items():
+                    if resource not in allow_dashboards_list:
+                        continue
+                    write_group_to_file(resource.replace('.json', ''), content, src['source'], dashboards_destination)
        
     print("Finished")
 

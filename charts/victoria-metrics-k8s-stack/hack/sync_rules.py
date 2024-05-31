@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """Fetch alerting and aggregation rules from provided urls into this chart."""
+import json
 import textwrap
 from os import makedirs
 
+import _jsonnet
 import requests
 import yaml
 from yaml.representer import SafeRepresenter
 import re
 
+from urllib.parse import urljoin
 
 # https://stackoverflow.com/a/20863889/961092
 class LiteralStr(str):
@@ -62,8 +65,10 @@ charts = [
         'destination': '../templates/rules',
     },
     {
-        'source': 'https://etcd.io/docs/v3.5/op-guide/etcd3_alert.rules.yml',
+        'source': 'https://raw.githubusercontent.com/etcd-io/etcd/main/contrib/mixin/mixin.libsonnet',
         'destination': '../templates/rules',
+        'is_mixin': True,
+        'mixin_template': '({}).prometheusAlerts',
     }
 ]
 
@@ -201,6 +206,9 @@ def fix_expr(rules):
         if '\n' in rule['expr']:
             rule['expr'] = LiteralStr(rule['expr'])
 
+def fix_name(name):
+    """Replace '_' wigh '-' in name"""
+    return name.replace('_', '-')
 
 def yaml_str_repr(struct, indent=4):
     """represent yaml as a string"""
@@ -308,7 +316,7 @@ def write_group_to_file(group, url, destination):
     rules = add_rules_per_rule_conditions(rules, group)
     # initialize header
     lines = header % {
-        'name': group['name'],
+        'name': fix_name(group['name']),
         'url': url,
         'condition': condition_map.get(group['name'], ''),
         'init_line': init_line
@@ -354,7 +362,17 @@ def main():
             print(f"Skipping the file, response code {response.status_code} not equals 200")
             continue
         raw_text = response.text
-        yaml_text = yaml.full_load(raw_text)
+        if chart.get('is_mixin'):
+            def import_callback(dir, rel):
+                url = urljoin(dir, rel)
+                response = requests.get(url)
+                if response.status_code != 200:
+                    raise Exception('error loading import')
+                return urljoin(url, '.'), response.content
+            yaml_text = json.loads(_jsonnet.evaluate_snippet(chart['source'], chart['mixin_template'].format(raw_text), import_callback=import_callback))
+        else:
+            raw_text = re.sub(r"\"\.$", ".\"", raw_text, flags=re.MULTILINE)
+            yaml_text = yaml.full_load(raw_text)
 
         # etcd workaround, their file don't have spec level
         groups = yaml_text['spec']['groups'] if yaml_text.get('spec') else yaml_text['groups']

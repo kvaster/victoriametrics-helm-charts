@@ -10,7 +10,11 @@ metadata:
     app.kubernetes.io/component: {{ include "victoria-metrics-k8s-stack.name" $ }}-alertmanager
 {{ include "victoria-metrics-k8s-stack.labels" . | indent 4 }}
 stringData:
+{{- if .Values.alertmanager.tplConfig }}
+  alertmanager.yaml: {{ tpl (toYaml .Values.alertmanager.config) . | quote }}
+{{- else }}
   alertmanager.yaml: {{ toYaml .Values.alertmanager.config | quote }}
+{{- end }}
 {{- end }}
 ---
 apiVersion: operator.victoriametrics.com/v1beta1

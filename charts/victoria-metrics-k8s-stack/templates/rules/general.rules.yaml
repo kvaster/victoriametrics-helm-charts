@@ -79,7 +79,7 @@ spec:
 
           severity of ''warning'' or ''critical'' starts firing on the same namespace.
 
-          This alert should be routed to a null receiver and configured to inhibit alerts with severity="info".
+          This alert should be routed to a null receiver and configured to inhibit alerts with severity="info."
 
           '
         runbook_url: {{ .Values.defaultRules.runbookUrl }}/general/infoinhibitor
